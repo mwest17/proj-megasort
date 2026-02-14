@@ -1,4 +1,4 @@
 all: megasort
 
 megasort: megasort.c
-	gcc -o megasort megasort.c
+	gcc -Wall -O3 -o megasort megasort.c
