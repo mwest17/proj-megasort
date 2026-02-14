@@ -15,31 +15,26 @@ char* splitPath;
 char* sortPath;
 char* mergePath;
 
-// char* splitName;
-// char* sortName;
-// char* mergeName;
-
 long maxLines;
 
+// Makes a call to the split program 
 void splitCall(char* inputFile, long lines) {
     pid_t childPID = fork();
 
     if (childPID == 0) {
-        char linesString[1 << 13]; // TODO****
+        char linesString[1 << 13];
         sprintf(linesString, "%ld", lines); 
-        int err = execl(splitPath, "split_prog", inputFile, linesString, (char *) NULL);
+
+        execlp(splitPath, "split_prog", inputFile, linesString, (char *) NULL);
         
         printf("Split Program Call Failed: %d\n", errno);
-        printf("%s\n", splitPath);
-        
         exit(1);
     } else {
         waitpid(childPID, NULL, 0);
     }
 }
 
-
-// HERE ***
+// Makes a call to the sort program, giving it input from the inputPath file and storing output to outputPath file
 void sortCall(char* inputPath, char* outputPath) {
     pid_t childPID = fork();
     
@@ -47,15 +42,16 @@ void sortCall(char* inputPath, char* outputPath) {
         int outputFile = open(outputPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         int inputFile = open(inputPath, O_RDONLY);
 
+        // Store stdout to outputFile
         dup2(outputFile, STDOUT_FILENO);
+        // Replace stdin with inputFile
         dup2(inputFile, STDIN_FILENO);
         close(outputFile);
         close(inputFile);
 
-        execl(sortPath, "sort_prog", (char *) NULL); // NEED TO WRITE INPUT FILE TO STDIN
+        execlp(sortPath, "sort_prog", (char *) NULL);
 
         printf("Sort Program Call Failed: %d\n", errno);
-
         exit(1);
     } else {
         waitpid(childPID, NULL, 0);
@@ -63,79 +59,97 @@ void sortCall(char* inputPath, char* outputPath) {
     
 }
 
-
-// HERE**
+// Makes a call to the merge program and stores in outputPath
 void mergeCall(char* parentOutput, char* childOutput, char* outputPath) {
+    pid_t PID = getpid();
     pid_t childPID = fork();
-    
+    char tmpOutput[1 << 13];
+    sprintf(tmpOutput, "tmpOutput%d.txt", PID);
+
     if (childPID == 0) {
-        int outputFile = open(outputPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-
-
-        char cwd[PATH_MAX]; 
-        getcwd(cwd, PATH_MAX);
-        printf("%s\n", cwd);
-        printf("%s\n", parentOutput);
-        printf("%s\n", outputPath);
+        // Make a tmp output file so output doesn't overwrite any input files
+        int outputFile = open(tmpOutput, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
         dup2(outputFile, STDOUT_FILENO);
         close(outputFile);
 
-        execl(mergePath, "merge_prog", parentOutput, childOutput, (char *) NULL);
+        execlp(mergePath, "merge_prog", parentOutput, childOutput, (char *) NULL);
         printf("Merge Program Call Failed: %d\n", errno);
 
         exit(1);
     } else {
         waitpid(childPID, NULL, 0);
+
+        // Replace contents of outputPath with merged
+        rename(tmpOutput, outputPath);
     }
 }
 
-void mergeSort(char* inputPath, char* outputPath, long lineCount) {
-    // Base Case: We can sort directly
-    if (lineCount <= maxLines) {
-        sortCall(inputPath, outputPath);
+
+void mergeSortNodes(int left, int right) {
+    if (left > right) return;
+
+    // If only sorting 1 file, simply sort
+    if (left == right) {
+        char inputName[128], outputName[128];
+        sprintf(inputName, "part%d.txt", left);
+        sprintf(outputName, "output%d.txt", left);
+
+        sortCall(inputName, outputName);
         return;
     }
 
-    // Split file 
-    long newLineCount = (lineCount + 2 - 1) / 2; // NEED TO HANDLE ODD LENGTHS
-    splitCall(inputPath, newLineCount);
-    
-    
-    // Create new output Files
-    char* childOutput = "output1.txt";
-    char* parentOutput = "output0.txt";
+    // Divide remaining work in 2
+    int mid = (left + right) / 2;
 
-    char* childInput = "../part1.txt";
-    char* parentInput = "../part0.txt";
-
-    // Go into new directory (so workspace isn't cluttered)
-    pid_t PID = getpid();
-    char newDir[8];
-    sprintf(newDir, "%d", PID); 
-    mkdir(newDir, 0777);
-    chdir(newDir);
-
-    // Create a child process (fork)
-    pid_t childPID = fork() == 0;
-
-    if (childPID == 0) { // Child process
-        // Both recursively call mergeSort() on their corresponding files
-        mergeSort(childInput, childOutput, newLineCount);
-    } else {
-        mergeSort(parentInput, parentOutput, newLineCount);
+    // Create child to process left half of files
+    pid_t leftChild = fork();
+    if (leftChild == 0) { 
+        mergeSortNodes(left, mid); 
+        exit(0); 
     }
 
-    // If parent, then we need to merge files
-    if (childPID != 0) {
-        waitpid(childPID, NULL, 0); // Must wait for child to be done sorting
-        mergeCall(parentOutput, childOutput, outputPath); // Merge files together
+    // Create child to process right half of files
+    pid_t rightChild = fork();
+    if (rightChild == 0) { 
+        mergeSortNodes(mid + 1, right); 
+        exit(0); 
     }
 
-    chdir("..");
+    // Wait for both to finish
+    waitpid(leftChild, NULL, 0);
+    waitpid(rightChild, NULL, 0);
 
-    return;
+    // Combine both left and right sets of files
+    char input1Name[128], input2Name[128];
+    sprintf(input1Name, "output%d.txt", left);
+    sprintf(input2Name, "output%d.txt", mid + 1);
+    mergeCall(input1Name, input2Name, input1Name);
+    remove(input2Name);
+
+    exit(0);
 }
+
+
+void mergeSort(char* inputPath, char* outputPath, long lineCount) {
+    // Split file into allowed sorting size
+    splitCall(inputPath, maxLines);
+    // Calculate the number of files created
+    long numFiles = (lineCount + maxLines - 1) / maxLines;
+
+    // Start recursive sorting
+    pid_t childPID = fork();
+
+    if (childPID == 0) {
+        mergeSortNodes(0, numFiles - 1);
+    }
+
+    waitpid(childPID, NULL, 0);
+
+    rename("output0.txt", outputPath);
+}
+
+
 
 long countLines(char* filePath) {
     FILE* file = fopen(filePath, "r");
@@ -151,11 +165,6 @@ long countLines(char* filePath) {
             }
         }
     }
-
-    // if (buffer[bytesRead - 1] != '\n') {
-    //     counter++;
-    // }
-
     return counter;
 }
 
@@ -165,28 +174,9 @@ int main(int argc, char* argv[]) {
         printf("Invalid number of arguments: %d\n", argc);
     } 
 
-    if (argv[1][0] != '/') {
-        char cwd[PATH_MAX]; 
-        getcwd(cwd, PATH_MAX);
-        splitPath = (char*) malloc(sizeof(cwd) + sizeof(argv[1]) - 1);
-        sortPath  = (char*) malloc(sizeof(cwd) + sizeof(argv[2]) - 1);
-        mergePath = (char*) malloc(sizeof(cwd) + sizeof(argv[3]) - 1);
-
-        strcpy(splitPath, cwd);
-        strcpy(sortPath,  cwd);
-        strcpy(mergePath, cwd);
-        
-        // NEED TO DEAL WITH PATH****
-        int offset = (argv[1][0 == '.'])? 2 : 0;
-        strcat(splitPath, argv[1] + offset);
-        
-        strcat(sortPath,  argv[2] + offset);
-        strcat(mergePath, argv[3] + offset);
-    } else {
-        splitPath = argv[1];
-        sortPath  = argv[2];
-        mergePath = argv[3];
-    }
+    splitPath = argv[1];
+    sortPath  = argv[2];
+    mergePath = argv[3];
 
     char* inputPath = argv[4];
     maxLines = atoi(argv[5]);
